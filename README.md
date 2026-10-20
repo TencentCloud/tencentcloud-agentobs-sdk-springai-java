@@ -2,145 +2,155 @@
 
 > **Language / 语言**：**English** · [中文](README.zh-CN.md)
 
-**Tencent Cloud CLS observability SDK for Spring AI 1.x.**
+**Tencent Cloud CLS observability SDK for Spring AI.**
 
-Mirrors every Spring AI–flavoured Micrometer `Observation` (`ChatClient` /
-`ChatModel` / `Advisor` / `ToolCallback` / `EmbeddingModel` / `VectorStore`)
-into a CLS-GenAI-Trace-compliant OpenTelemetry span tree and ships it to
-Tencent Cloud CLS over the standard **OTLP/HTTP** protocol.
+Mirrors every Micrometer `Observation` that Spring AI emits natively
+(`ChatClient` / `ChatModel` / `Advisor` / `ToolCallback` / `EmbeddingModel` /
+`VectorStore`) into a CLS-GenAI-Trace-compliant OpenTelemetry span tree and
+ships it to Tencent Cloud CLS over the standard **OTLP/HTTP** protocol.
 
-- ✅ **No bytecode instrumentation** — pure SDK, no javaagent required
-- ✅ **One-line setup** — `ClsObservability.install().registerOn(observationRegistry)`
-- ✅ **Shaded OTel SDK** — coexists safely with ARMS javaagent / any other
-  in-JVM OTel implementation; nobody can hijack this SDK's Tracer
-- ✅ **Bypasses the `include-prompt` toggle** — prompt / completion / tool
-  arguments are read directly off `ObservationContext` via reflection, so you
-  get full content without flipping the privacy switch
-- ✅ **CLS GenAI Trace compliant** — produces the `entry → agent → step → chat / tool`
+- **No bytecode instrumentation** — pure library, no javaagent required
+- **One-line setup** — `ClsObservability.install().registerOn(observationRegistry)`
+- **Shaded OTel SDK** — coexists safely with ARMS javaagent or any other
+  in-JVM OpenTelemetry implementation; nobody can hijack this SDK's Tracer
+- **Bypasses the `include-prompt` toggle** — prompt / completion / tool
+  arguments are read directly off `ObservationContext`, so you get full
+  content without flipping Spring AI's privacy switch
+- **CLS GenAI Trace compliant** — `entry → agent → react → chat / tool`
   span tree, isomorphic to the sibling AgentScope SDK
+- **Sub-agents, multi-round ReAct and streaming** — nested `ChatClient`s
+  inside tools become `invoke_subagent` spans; every tool-call round gets
+  its own `react round_N` step; `.stream()` traces stay intact across
+  Reactor worker threads
 
 ---
 
-## 1. Maven dependency
+## 1. Compatibility
+
+| Component | Supported |
+|---|---|
+| JDK | 17+ |
+| Spring AI | 1.0.x and 2.0.x (compiled against 1.0.0; `demo-springboot` runs on 2.0.1) |
+| Spring Boot | 3.x / 4.x (`demo-springboot` runs on 4.1.1) |
+| Micrometer Observation | whatever your Spring Boot brings in |
+
+---
+
+## 2. Maven dependency
 
 ```xml
 <dependency>
     <groupId>com.tencentcloudapi.observability</groupId>
     <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
-    <version>0.0.9</version>
+    <version>1.0.0</version>
 </dependency>
 ```
 
-Your host application must already provide (this SDK pulls them as `provided`,
-so it won't force a version on you):
-- `spring-ai-client-chat` / `spring-ai-model` — Spring AI 1.x
-- `micrometer-observation` — bundled with Spring Boot 3.x by default
+Your host application must already provide the following (the SDK declares
+them as `provided`, so it never forces a version on you):
+
+- `spring-ai-client-chat` / `spring-ai-model`
+- `micrometer-observation`
 
 ---
 
-## 2. CLS configuration (four required fields)
+## 3. Configuration
+
+### Required
 
 | Env var | Description |
 |---|---|
-| `CLS_ENDPOINT` | e.g. `https://<region>.cls.tencentcs.com` |
+| `CLS_ENDPOINT` | CLS OTLP endpoint, e.g. `https://ap-guangzhou.cls.tencentcs.com` (`https://` is prepended if no scheme is given) |
 | `CLS_TOPIC_ID` | CLS log topic ID |
-| `CLS_SECRET_ID` | Tencent Cloud access key ID |
-| `CLS_SECRET_KEY` | Tencent Cloud access key secret |
+| `CLS_SECRET_ID` | Tencent Cloud SecretId |
+| `CLS_SECRET_KEY` | Tencent Cloud SecretKey |
 
-Optional: `CLS_SERVICE_NAME`, `CLS_SOURCE`, `CLS_BATCH_SIZE`, `CLS_DEBUG`.
+`install()` fails fast with an `IllegalStateException` listing the missing
+fields if any of the four is absent.
 
-**Three config sources** (highest priority first):
-1. `ClsConfig.builder().endpoint(...)` — explicit values
+### Optional
+
+| Env var | Builder method | Default | Description |
+|---|---|---|---|
+| `CLS_SERVICE_NAME` | `serviceName` | `springai-app` | Resource `service.name` |
+| `CLS_SERVICE_VERSION` | `serviceVersion` | — | Resource `service.version` |
+| `CLS_SERVICE_INSTANCE_ID` | `serviceInstanceId` | `<hostname>@<pid>` | Resource `service.instance.id` |
+| `CLS_DEPLOYMENT_ENVIRONMENT` | `deploymentEnvironment` | — | Resource `deployment.environment.name` |
+| `CLS_SOURCE` | `source` | local IP | Resource `host.ip` |
+| `CLS_BATCH_SIZE` | `batchSize` | `32` (clamped to 1..1000) | `BatchSpanProcessor` max export batch size |
+| `CLS_DEBUG` | `debug` | `false` | Log each observation's start / stop at SLF4J `DEBUG` |
+| `CLS_SPRINGAI_REACTOR_CONTEXT_PROPAGATION` | `reactorContextPropagation` | `true` | See [§6](#6-streaming--reactor) |
+| `CLS_CUSTOM_<KEY>` | `customAttribute(key, value)` | — | Written as `agent.custom.<key>` (key lower-cased) |
+
+### Resolution order (highest priority first)
+
+1. `ClsConfig.builder()...` explicit values
 2. Process environment variables
-3. `./.env` or `~/.agentobs-springai/config.env`
+3. The first file found among `./.env` and `~/.agentobs-springai/config.env`
+   (never overrides real env vars)
+
+> Keep credentials in environment variables or a `.env` file that is
+> excluded from version control (`.env` is already in this repo's
+> `.gitignore`). Never hard-code `SecretId` / `SecretKey` in source.
+
+Spans are uploaded to `<CLS_ENDPOINT>/v1/traces` with
+`Authorization: Basic base64(SecretId:SecretKey)` and a `topic_id` header.
 
 ---
 
-## 3. Wiring (idiomatic Spring Boot)
+## 4. Wiring
+
+### Spring Boot
 
 ```java
 import com.tencentcloudapi.observability.springai.ClsObservability;
 import io.micrometer.observation.ObservationRegistry;
-import jakarta.annotation.PostConstruct;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class ClsObservabilityConfig {
 
-    @Autowired
-    private ObservationRegistry observationRegistry;
-
-    @PostConstruct
-    public void setup() {
-        ClsObservability.install()                 // reads env / .env / builder
-                .registerOn(observationRegistry);  // attach to Spring AI's registry
+    @Bean(destroyMethod = "shutdown")   // flush pending spans on context close
+    public ClsObservability clsObservability(ObservationRegistry observationRegistry) {
+        ClsObservability obs = ClsObservability.install();   // env / .env
+        obs.registerOn(observationRegistry);                 // Spring AI's registry
+        return obs;
     }
 }
 ```
 
-> **Important**: register the handler onto the *same* `ObservationRegistry`
-> bean Spring AI actually uses (Spring Boot auto-config exposes a global bean
-> named `observationRegistry`). If you `new` a fresh registry and register
-> there, no Spring AI events will reach the SDK.
+With explicit settings:
 
-### Non-Spring-Boot usage
+```java
+ClsObservability obs = ClsObservability.install(
+        ClsConfig.builder()
+                .serviceName("order-assistant")
+                .serviceVersion("2.3.0")
+                .deploymentEnvironment("prod")
+                .customAttribute("project_id", "proj_001")
+                .build());   // credentials still come from env / .env
+```
+
+> **Important**: register the handler on the **same** `ObservationRegistry`
+> bean that Spring AI uses. A freshly `new`-ed registry receives no Spring AI
+> events. Spring Boot normally exposes this bean through Actuator's
+> auto-configuration. If your app has no `ObservationRegistry` bean, declare
+> one with `@ConditionalOnMissingBean`, as
+> [`demo-springboot`'s `ClsObsConfig`](demo-springboot/src/main/java/com/tencentcloudapi/observability/springai/demo/boot/config/ClsObsConfig.java)
+> does.
+
+### Plain Java
 
 ```java
 ClsObservability obs = ClsObservability.install();
-ObservationRegistry registry = /* your registry */;
-obs.registerOn(registry);
+obs.registerOn(registry);   // the registry your ChatClient / ChatModel uses
+// ...
+obs.flush();      // optional, force-flush pending spans
+obs.shutdown();   // also runs automatically in a JVM shutdown hook
 ```
 
----
-
-## 4. Produced span tree (CLS GenAI Trace spec)
-
-The SDK produces an **isomorphic span tree to the AgentScope SDK**, in full
-compliance with the CLS GenAI Trace spec:
-
-```
-entry   (SERVER, gen_ai.span.kind=entry)        ← one per ChatClient call
-  └─ agent (INTERNAL, gen_ai.span.kind=agent)
-       ├─ step (INTERNAL, gen_ai.span.kind=step)  ← one per Advisor
-       │   ├─ chat (CLIENT, gen_ai.span.kind=chat)   ← ChatModel call
-       │   └─ tool (CLIENT, gen_ai.span.kind=tool)   ← tool / function call
-       ├─ step (operation.name=embedding | retrieval)
-       ├─ chat (ChatModel called directly off ChatClient)
-       └─ tool (tool  called directly off ChatClient)
-```
-
-### Spec-mandated attributes written on every span
-
-| Attribute | Description |
-|---|---|
-| `gen_ai.span.kind` | `entry` / `agent` / `step` / `chat` / `tool` |
-| `gen_ai.operation.name` | `enter_application` / `invoke_agent` / `react` / `chat` / `execute_tool` / `embedding` / `retrieval` |
-| `gen_ai.agent.type` | constant `spring-ai` |
-| `gen_ai.session.id` | read from `ClsBaggage.setSession()`; falls back to UUID when absent |
-| `gen_ai.turn.id` | `{sessionId}:t{N}` |
-| `gen_ai.step.id` | `{turnId}:s{N}` (step / chat / tool) |
-| `gen_ai.user.id` | read from `ClsBaggage.setUser()` (optional) |
-
-### Content fields (reflected off `ObservationContext`, no `include-prompt` required)
-
-| Attribute | Where | Value shape |
-|---|---|---|
-| `gen_ai.input.messages` | entry / agent / chat / step (request side) | **JSON array** per OpenTelemetry GenAI SemConv v1.37+: `[{"role":"system","content":"..."},{"role":"user","content":"..."}]` |
-| `gen_ai.output.messages` | entry / agent / chat / step (response side) | **JSON array**: `[{"role":"assistant","content":"...","tool_calls":[{"id":"...","type":"function","function":{"name":"...","arguments":"..."}}]}]` |
-| `gen_ai.tool.name` / `gen_ai.tool.type` / `gen_ai.tool.call.id` | tool |  |
-| `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` | tool | arguments is a JSON object string, result is the raw tool return value as string |
-| `gen_ai.tool.error.type` | tool (on exception) |  |
-| `gen_ai.usage.{input_tokens, output_tokens, total_tokens}` | chat (Spring AI native) |  |
-| `gen_ai.finish_reason` / `gen_ai.turn.completed` | entry / agent (on stop) |  |
-
-The {@code gen_ai.input.messages} / {@code gen_ai.output.messages} fields are
-produced by a built-in `ClsGenAIFormatter` that converts Spring AI's native
-`Prompt` / `ChatResponse` objects into the OpenAI-chat JSON shape the CLS
-console expects — so each message renders as its own chat-bubble, not a single
-opaque text blob.
-
-### Propagate `session.id` / `user.id` (strongly recommended)
+### Propagate session / user identity (strongly recommended)
 
 ```java
 import com.tencentcloudapi.observability.springai.ClsBaggage;
@@ -149,7 +159,7 @@ import com.tencentcloudapi.observability.springai.ClsBaggage;
 public String chat(@RequestHeader("X-Session-Id") String sessionId,
                    @RequestHeader("X-User-Id")    String userId,
                    @RequestBody String prompt) {
-    ClsBaggage.set(sessionId, userId);
+    ClsBaggage.set(sessionId, userId);          // or set(sessionId, userId, userName)
     try {
         return chatClient.prompt().user(prompt).call().content();
     } finally {
@@ -158,29 +168,141 @@ public String chat(@RequestHeader("X-Session-Id") String sessionId,
 }
 ```
 
-Without this, the SDK auto-generates a `sess-xxxxxxxxxxxxxxxx` session id,
-so the trace tree is still complete — you just lose the ability to aggregate
-per-user / per-session on the CLS console.
+| API | Span attribute |
+|---|---|
+| `ClsBaggage.set(sessionId, userId[, userName])` | all three at once |
+| `ClsBaggage.setSession(id)` | `gen_ai.session.id` |
+| `ClsBaggage.setUser(id)` | `gen_ai.user.id` |
+| `ClsBaggage.setUserName(name)` | `gen_ai.user.name` |
+
+Baggage is captured when the turn starts on the calling thread, so you do
+**not** need to propagate it through Reactor operators for `.stream()`.
+If you skip `ClsBaggage`, the SDK generates a `sess-<16 hex>` session id —
+the trace is still complete, but you can't aggregate it per user / session
+in the CLS console.
 
 ---
 
-## 5. Local verification (`demo/` sub-module)
+## 5. Produced span tree
 
-A standalone end-to-end verification demo lives in `demo/`. It fires a
-synthetic Spring-AI-shape observation tree (no real LLM, no network traffic)
-that fully exercises every code path in the handler and produces exactly
-**6 spans** on CLS: `entry + agent + step + chat × 2 + tool`.
+```
+enter_application                     SERVER    span.kind=entry      ← one per top-level ChatClient call
+└─ invoke_agent main                  INTERNAL  span.kind=agent      agent.scope=main
+   ├─ react round_1                   INTERNAL  span.kind=step       ← first Advisor (nested advisors are collapsed)
+   │  ├─ chat <model>                 CLIENT    span.kind=chat       ← ChatModel call
+   │  ├─ execute_tool <tool>          CLIENT    span.kind=tool       ← ToolCallback
+   │  │  └─ invoke_subagent <tool>    INTERNAL  span.kind=agent      agent.scope=subagent ← nested ChatClient in a tool
+   │  │     └─ react round_1 ─ chat / execute_tool ...
+   │  ├─ embedding                    CLIENT    span.kind=step       ← EmbeddingModel
+   │  └─ retrieval <store>            INTERNAL  span.kind=retriever  ← VectorStore query
+   └─ react round_2 .. N              INTERNAL  span.kind=step       ← one more per tool-call round
+      └─ chat <model> / execute_tool <tool> ...
+```
 
-### Run
+- **ReAct rounds**: when a `chat` finishes with `finish_reason=tool_calls`,
+  the next `chat` / `embedding` opens a new `react round_N` sibling step.
+- **Sub-agents**: a `ChatClient` invoked inside a tool becomes
+  `invoke_subagent <toolName>` (fallback `subagent-N`), shares the outer
+  `session.id` / `turn.id`, and links back via
+  `gen_ai.subagent.parent_tool_call.id`. Arbitrary nesting depth is supported,
+  for both `.call()` and `.stream()` on either side.
+- **Sibling ChatClients**: multiple top-level `ChatClient` calls made one
+  after another in the same request produce **independent traces**.
+- Other observations map to `step` spans: `image_generation`,
+  `add_documents` / `delete_documents` (VectorStore writes), or the raw
+  observation name.
+
+### Identity attributes
+
+| Attribute | Value |
+|---|---|
+| `gen_ai.span.kind` | `entry` / `agent` / `step` / `chat` / `tool` / `retriever` |
+| `gen_ai.operation.name` | `enter_application` / `invoke_agent` / `invoke_subagent` / `react` / `chat` / `execute_tool` / `embedding` / `retrieval` / ... |
+| `gen_ai.agent.type` | constant `spring-ai` |
+| `gen_ai.agent.name` / `gen_ai.agent.scope` | `main` / `main`, or `<toolName>` / `subagent` |
+| `gen_ai.session.id` | from `ClsBaggage`, else `sess-<16 hex>` |
+| `gen_ai.turn.id` | `{sessionId}:t{N}` — N increments per session |
+| `gen_ai.step.id` / `gen_ai.react.round` | `{turnId}:s{N}` / round number (react and its children) |
+| `gen_ai.user.id` / `gen_ai.user.name` | from `ClsBaggage` (optional) |
+| `gen_ai.request.streaming` | `true` on entry / agent / chat spans of a `.stream()` turn (omitted for `.call()`) |
+| `agent.custom.<key>` | from `customAttribute` / `CLS_CUSTOM_*` (on react / chat / tool / embedding / retrieval spans) |
+
+### Content and metrics attributes
+
+| Span | Attributes |
+|---|---|
+| entry / agent / react / chat | `gen_ai.input.messages`, `gen_ai.output.messages` — OpenAI-chat-shaped JSON arrays (OTel GenAI SemConv v1.37+), truncated at 8000 chars |
+| chat | `gen_ai.request.model` / `temperature` / `top_p` / `top_k` / `max_tokens` / `frequency_penalty` / `presence_penalty` / `stop_sequences` / `seed`, `gen_ai.response.finish_reasons`, `gen_ai.usage.*` (Spring AI native), `gen_ai.chat.duration_ms` |
+| tool | `gen_ai.tool.name` / `type` / `call.id` / `call.arguments` / `call.result`, `gen_ai.tool.call.duration_ms`, `gen_ai.tool.error.type` (on error) |
+| react | `gen_ai.react.finish_reason` |
+| embedding | `gen_ai.embeddings.purpose` / `input` / `input_count` / `vector_count` / `vector_dimensions` |
+| retrieval | `gen_ai.retrieval.query_text`, `gen_ai.request.top_k`, `gen_ai.retrieval.documents.count`, `gen_ai.retrieval.duration_ms` |
+| invoke_subagent | `gen_ai.subagent.parent_tool_call.id` |
+
+All Micrometer low / high cardinality key-values Spring AI attaches are
+copied onto the span as well. On error, the span records the exception
+and is set to `ERROR`; a root turn's error also propagates to its
+`enter_application` span.
+
+### Resource attributes
+
+`service.name` / `service.version` / `service.instance.id`,
+`deployment.environment.name`, `host.name` / `host.ip`, `process.pid` /
+`process.runtime.*`, `os.type` / `os.description` / `os.version`,
+`telemetry.sdk.*`.
+
+---
+
+## 6. Streaming / Reactor
+
+`ChatClient.stream()` runs Spring AI's inner observations on Reactor
+scheduler threads. To keep them in one trace, `install()` reflectively calls
+`reactor.core.publisher.Hooks.enableAutomaticContextPropagation()` (no
+compile-time dependency on `reactor-core`; a no-op if Reactor is absent).
+The hook is JVM-global and idempotent.
+
+Opt out (e.g. you already enable it yourself) with any of:
+
+- `ClsConfig.builder().reactorContextPropagation(false)`
+- `-Dcls.springai.reactor-context-propagation=false` (beats the env var)
+- `CLS_SPRINGAI_REACTOR_CONTEXT_PROPAGATION=false`
+
+---
+
+## 7. Coexisting with ARMS / other OTel implementations
+
+All `io.opentelemetry.*` classes (plus OkHttp / Okio / Protobuf) are
+relocated to `com.tencentcloudapi.observability.shaded.*` at build time:
+
+- An ARMS javaagent pattern-matches on `io.opentelemetry.*` and **cannot**
+  see this SDK's Tracer, so our spans are never hijacked.
+- The internal `OpenTelemetrySdk` is created with `build()`, not
+  `buildAndRegisterGlobal()`, so it never fights the host app for the
+  `GlobalOpenTelemetry` singleton.
+- Only `io.micrometer.observation.*` is deliberately **not** shaded — the
+  SDK must share that SPI with Spring AI to receive events.
+
+**Known trade-off**: if a worker thread carries both an APM parent context
+and residual state from a previous `.stream()` turn, the SDK starts the new
+turn from `Context.root()` to keep CLS traces independent, which drops the
+APM linkage for that request. See [CHANGELOG](CHANGELOG.md) `0.0.12`.
+
+---
+
+## 8. Local verification (`demo/`)
+
+A standalone demo in `demo/` fires a synthetic Spring-AI-shaped observation
+tree (no real LLM, no LLM network traffic — only the upload to CLS) and
+produces exactly **6 spans**.
 
 ```bash
-# 1) Configure CLS
+# 1) Configure CLS (or put these in ~/.agentobs-springai/config.env)
 export CLS_ENDPOINT=https://ap-guangzhou.cls.tencentcs.com
-export CLS_TOPIC_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-export CLS_SECRET_ID=AKID...
-export CLS_SECRET_KEY=...
+export CLS_TOPIC_ID=<your-topic-id>
+export CLS_SECRET_ID=<your-secret-id>
+export CLS_SECRET_KEY=<your-secret-key>
 
-# 2) Install the main SDK into your local Maven repo
+# 2) Install the SDK into your local Maven repo (from the repo root)
 mvn -q -DskipTests -Dgpg.skip=true install
 
 # 3) Build & run the demo
@@ -189,142 +311,91 @@ mvn -q -DskipTests package
 java -jar target/springai-demo-shaded.jar
 ```
 
-### Expected console output
+The console prints the `sessionId`. In the CLS console → GenAI Trace,
+filter by `gen_ai.session.id = <printed value>`:
 
-```
-================================================================
-[demo] done. sessionId = demo-session-1760000000000
-       userId    = demo-user
-       expected  = 6 spans in CLS:
-                   1 × entry   (gen_ai.span.kind=entry)
-                   1 × agent   (gen_ai.span.kind=agent)
-                   1 × step    (gen_ai.span.kind=step)
-                   2 × chat    (gen_ai.span.kind=chat)
-                   1 × tool    (gen_ai.span.kind=tool)
-       → go to CLS and filter by gen_ai.session.id = demo-session-1760000000000
-================================================================
-```
-
-### What to verify on the CLS console
-
-Open the CLS console → GenAI Trace → filter by
-`gen_ai.session.id = <the printed value>`. You should see one trace with
-6 spans and the following parent/child structure:
-
-| # | span name | `gen_ai.span.kind` | `gen_ai.operation.name` | parent | key fields |
-|---|---|---|---|---|---|
-| 1 | `enter_application` | `entry` | `enter_application` | *(root)* | `session.id`, `turn.id`, `user.id`, `input.messages` |
-| 2 | `invoke_agent` | `agent` | `invoke_agent` | #1 entry | + `output.messages`, `finish_reason`, `turn.completed` |
-| 3 | `react` | `step` | `react` | #2 agent | `step.id` (e.g. `demo-session-xxx:t1:s1`) |
-| 4 | `chat` | `chat` | `chat` | #3 step | `request.model=gpt-4o`, `usage.input_tokens=42`, `usage.output_tokens=17`, `finish_reasons=tool_calls` |
-| 5 | `execute_tool` | `tool` | `execute_tool` | #3 step | `tool.name=get_weather`, `tool.call.arguments={"city":"Beijing"}`, `tool.call.result={"city":"Beijing","temp":"22C",…}` |
-| 6 | `chat` | `chat` | `chat` | #3 step | `usage.input_tokens=60`, `usage.output_tokens=25`, `finish_reasons=stop` |
-
-If all 6 spans appear with the exact parent/child structure above, the SDK
-is wired correctly for your environment.
-
-### Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| No trace on CLS | wrong endpoint / topic / secret | enable `CLS_DEBUG=1` to log the full upload URL + response code |
-| Only 1 span per trace | handler registered on the wrong registry | ensure `obs.registerOn(registry)` uses the *same* registry instance that actually runs the observations |
-| `session.id` column empty | `ClsBaggage.set(...)` never called | add `ClsBaggage.set(sid, uid)` in your controller |
+| # | span name | `gen_ai.span.kind` | parent | key fields |
+|---|---|---|---|---|
+| 1 | `enter_application` | `entry` | *(root)* | `session.id`, `turn.id`, `user.id`, `input.messages` |
+| 2 | `invoke_agent main` | `agent` | #1 | `agent.name=main`, `agent.scope=main`, `output.messages` |
+| 3 | `react round_1` | `step` | #2 | `step.id=<session>:t1:s1`, `react.round=1` |
+| 4 | `chat gpt-4o` | `chat` | #3 | `usage.input_tokens=42`, `usage.output_tokens=17` |
+| 5 | `execute_tool get_weather` | `tool` | #3 | `tool.call.arguments={"city":"Beijing"}`, `tool.call.result=...` |
+| 6 | `chat gpt-4o` | `chat` | #3 | `usage.input_tokens=60`, `usage.output_tokens=25` |
 
 ---
 
-## 6. Real end-to-end demo (`demo-springboot/` sub-module)
+## 9. Real end-to-end demo (`demo-springboot/`)
 
-A sibling demo module `demo-springboot/` runs a **real Spring Boot 3 Web
-application** that calls the actual Tencent Hunyuan LLM, exercises
-`@Tool` function calling and local-vector-store RAG — i.e. the closest
-possible shape to a production Spring AI app. The SDK captures the full
-chain to CLS GenAI Trace automatically.
-
-| | `demo/` | `demo-springboot/` |
-|---|---|---|
-| Shape | Fat jar CLI | Spring Boot 3 Web (`POST /chat`) |
-| LLM | Mock (synthetic observations) | **Real** — Hunyuan `hy4-preview` via tokenhub |
-| Embedding | — | **Real** — `kinfra-text-embedding-0.6b` (1024-dim) |
-| Tools | — | 2 × `@Tool` (weather / current time) |
-| RAG | — | `SimpleVectorStore` + local JSON persistence |
-| Network | not required | required (Hunyuan + CLS) |
+A Spring Boot 4 + Spring AI 2.0 web app that calls the real Tencent
+Hunyuan LLM (`hy4-preview` via tokenhub), with two `@Tool`s, local-vector-store
+RAG, `ChatMemory`, sub-agents and streaming endpoints.
 
 ```bash
-# One-shot:
-set -a; source ~/.agentobs-springai/config.env; set +a
-mvn -q -DskipTests -Dgpg.skip=true install                   # install SDK
-mvn -f demo-springboot/pom.xml spring-boot:run                # run demo
+set -a; source ~/.agentobs-springai/config.env; set +a    # HUNYUAN_API_KEY + CLS_*
+mvn -q -DskipTests -Dgpg.skip=true install                # install SDK
+mvn -f demo-springboot/pom.xml spring-boot:run            # run demo on :8080
 
-# Trigger a trace:
 curl -sS -X POST http://localhost:8080/chat \
   -H 'Content-Type: application/json' \
   -H 'X-Session-Id: demo-weather-001' -H 'X-User-Id: alice' \
   -d '{"q":"北京今天天气怎么样？"}'
 ```
 
-See [`demo-springboot/README.md`](demo-springboot/README.md) for full
-instructions (env vars, three verification scenarios, FAQ).
+| Endpoint | Scenario |
+|---|---|
+| `POST /chat` | `.call()` + RAG + tools |
+| `POST /chat/stream-plain` · `/chat/stream-rich` | top-level `.stream()`, plain / with RAG + tools |
+| `POST /chat/memory` | `ChatMemory` multi-turn |
+| `POST /error-demo/soft` · `/error-demo/hard` | tool exception swallowed / rethrown |
+| `POST /subagent-demo` · `/stream` · `/stream-deep` | sub-agent: call+call / stream+call / stream+stream |
+| `POST /subagent-deep-demo` | 3-layer nested sub-agents |
+| `POST /multi-agent-demo` | two sibling ChatClients in one request |
+| `GET /sequential-stream-demo` | four sequential top-level `.stream()` calls in one request |
+
+See [`demo-springboot/README.md`](demo-springboot/README.md) for details.
 
 ---
 
-## 7. Coexisting with ARMS / other OTel implementations
+## 10. Troubleshooting
 
-The SDK **relocates all `io.opentelemetry.*` classes to
-`com.tencentcloudapi.observability.shaded.io.opentelemetry.*`** at build time,
-which means:
+Enable `CLS_DEBUG=1` (or `.debug(true)`) and set the
+`com.tencentcloudapi.observability` logger to `DEBUG` to see lines such as
+`onStart  TURN  session=... turn=... traceId=...`.
 
-- If ARMS javaagent is attached to the JVM, its bytecode instrumentation
-  pattern-matches on `io.opentelemetry.*` and **cannot** see our internal
-  Tracer → our spans are never hijacked.
-- The SDK's internal `OpenTelemetrySdk` is built with `build()`, not
-  `buildAndRegisterGlobal()` → never fights the host app for the
-  `GlobalOpenTelemetry` singleton.
-- The only package we deliberately do **not** shade is
-  `io.micrometer.observation.*` — the SDK must share this SPI contract
-  with Spring AI to receive events.
-
----
-
-## 8. Debugging
-
-Enable `CLS_DEBUG=1` or `ClsConfig.builder().debug(true)` to log each
-observation's start/stop at SLF4J debug level, useful for confirming events
-are flowing through.
-
-Common issues:
-1. **No spans received** — check the handler is on the `ObservationRegistry`
-   Spring AI actually uses, not a fresh one you created.
-2. **No trace on CLS** — check endpoint / topic / secret; debug logs print
-   the full URL.
-3. **Empty prompt content** — Spring AI's `include-prompt` is off by default,
-   so its native `gen_ai.prompt` is empty; this SDK's
-   `gen_ai.input.messages` / `gen_ai.output.messages` fields always carry
-   the content, prefer those.
+| Symptom | Cause | Fix |
+|---|---|---|
+| `IllegalStateException: CLS configuration incomplete` | a required field is missing | set the four `CLS_*` variables |
+| No spans at all | handler registered on the wrong registry | call `registerOn(...)` with the registry Spring AI actually uses |
+| No trace on CLS | wrong endpoint / topic / credentials | check the `installed (service=..., endpoint=..., topic=...)` startup log |
+| `.stream()` spans split into many traces | Reactor propagation disabled or failed | check the startup log for `enabled Reactor automatic context propagation` |
+| `session.id` is `sess-...` | `ClsBaggage` not set | call `ClsBaggage.set(...)` before the `ChatClient` call |
+| Spring AI's `gen_ai.prompt` is empty | `include-prompt` is off by default | use the SDK's `gen_ai.input.messages` / `gen_ai.output.messages` |
 
 ---
 
-## 9. Regression suite
+## 11. Regression suite
 
-A full end-to-end regression suite covering 12 verification cases
-(top-level sync / stream, ReAct round-switch, ChatMemory multi-turn,
-tool error swallow/rethrow, 3-layer nested subagents, 10-way concurrent
-streaming, sequential sibling ChatClients, Reactor cross-thread
-subagents) ships at [`scripts/run-regression.sh`](scripts/run-regression.sh).
+[`scripts/run-regression.sh`](scripts/run-regression.sh) runs 12 cases
+(13 sub-cases, G1–G10) against `demo-springboot`: top-level sync / stream,
+ReAct round-switch, ChatMemory, tool error swallow / rethrow, nested and
+3-layer sub-agents, 10-way concurrent streaming, sibling ChatClients, and
+Reactor cross-thread sub-agents.
 
 ```bash
 ./scripts/run-regression.sh
 ```
 
-One command installs the SDK, launches demo-springboot, fires all 12
-cases, parses the server log for trace structure, and prints a per-case
-PASS/FAIL verdict table. See
-[`docs/testing/regression-playbook.md`](docs/testing/regression-playbook.md)
-for the full case catalogue, assertion rules, failure triage, and the
-procedure for adding new cases.
+It installs the SDK, starts the demo, runs every case, parses the server
+log and prints a PASS / FAIL table. See
+[`docs/testing/regression-playbook.md`](docs/testing/regression-playbook.md).
 
 ---
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
-Apache License 2.0.
+[Apache License 2.0](LICENSE).

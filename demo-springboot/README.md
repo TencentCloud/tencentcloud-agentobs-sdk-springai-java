@@ -1,13 +1,14 @@
-# demo-springboot — 真实端到端 Spring Boot 3 + Spring AI 1.0 Demo
+# demo-springboot — 真实端到端 Spring Boot 4 + Spring AI 2.0 Demo
 
 > 本模块是和 `demo/`（纯 Mock、无网络）并列的**另一种 demo**：它跑真实的
-> Spring Boot 3 Web 应用，接真实的腾讯云混元大模型，带两个真实的 `@Tool`
-> 函数和基于本地向量库的真实 RAG，让本仓库 CLS SDK 在**最接近线上形态**的
-> 环境下完整采集并上报 trace 到腾讯云 CLS GenAI Trace。
+> Spring Boot 4.1 Web 应用（Spring AI 2.0.1），接真实的腾讯云混元大模型，带两个
+> 真实的 `@Tool` 函数和基于本地向量库的真实 RAG，并覆盖 ChatMemory、子 Agent、
+> 流式、tool 异常等场景，让本仓库 CLS SDK 在**最接近线上形态**的环境下完整采集
+> 并上报 trace 到腾讯云 CLS GenAI Trace。
 
 | 对比 | `demo/` | **`demo-springboot/`（本模块）** |
 |---|---|---|
-| 形态 | 单 jar CLI | Spring Boot 3 Web 应用（`POST /chat`） |
+| 形态 | 单 jar CLI | Spring Boot 4 Web 应用（多个 HTTP 端点，见第三节） |
 | LLM | 纯 Mock（合成 Observation） | **真实调用腾讯云混元**（`hy4-preview` via tokenhub） |
 | Embedding | 无 | **真实调用**（`kinfra-text-embedding-0.6b`，1024 维） |
 | Tool | 无 | 2 个 `@Tool`：天气 / 当前时间 |
@@ -105,15 +106,17 @@ curl -sS -X POST http://localhost:8080/chat \
 {"answer":"北京今天是晴天，气温 18°C，东北风 2 级，空气质量优。挺适合出门走走的～"}
 ```
 
-**预期 CLS trace 树**（在控制台搜 `gen_ai.session.id = demo-weather-001`）：
+**预期 CLS trace 树**（示意，在控制台搜 `gen_ai.session.id = demo-weather-001`）：
 
 ```
-entry (POST /chat)
-└── agent (spring-ai)
-    └── step (QuestionAnswerAdvisor)       ← RAG advisor 本身也走了，但召回无关
-        ├── chat (hy4-preview, finish_reason=tool_calls)
-        ├── tool (getWeather, args={"city":"北京"})
-        └── chat (hy4-preview, finish_reason=stop)
+enter_application
+└── invoke_agent main
+    ├── react round_1                    ← QuestionAnswerAdvisor
+    │   ├── retrieval <store>            ← RAG 检索（含 query embedding），召回内容与天气无关
+    │   ├── chat hy4-preview             finish_reasons=["tool_calls"]
+    │   └── execute_tool getWeather      arguments={"city":"北京"}
+    └── react round_2                    ← 上一轮以 tool_calls 结束，SDK 开启新一轮
+        └── chat hy4-preview             finish_reasons=["stop"]
 ```
 
 ### 场景 2：纯 RAG 查询（不触发 Tool）
@@ -143,6 +146,28 @@ curl -sS -X POST http://localhost:8080/chat \
 **预期**：先调 `getCurrentTime("Asia/Shanghai")`，再引用知识库里 Spring AI 的
 介绍回答。CLS 上会看到 chat → tool → chat → 包含 RAG 召回的最终 chat。
 
+### 其他端点（回归套件 G1–G11 使用）
+
+请求体统一为 `{"q":"..."}`，均支持 `X-Session-Id` / `X-User-Id` 请求头。
+
+| 端点 | 场景 | 回归用例 |
+|---|---|---|
+| `POST /chat` | 同步 `.call()` + RAG + tools | G7 |
+| `POST /chat/stream-plain` | 顶层 `.stream()`，纯 LLM | G1-plain |
+| `POST /chat/stream-rich` | 顶层 `.stream()` + RAG + tool | G1-rich |
+| `POST /chat/memory` | `ChatMemory` 多轮对话 | G2 |
+| `POST /error-demo/soft` | tool 抛异常，被默认 processor 吞掉 | G3-soft |
+| `POST /error-demo/hard` | tool 抛异常，自定义 processor 重新抛出 | G3-hard |
+| `POST /subagent-deep-demo` | 3 层直链嵌套子 Agent | G4 |
+| `POST /multi-agent-demo` | 同一请求内两个兄弟 ChatClient 顺序调用 | G6 |
+| `POST /subagent-demo` | 外层 `.call()` + 内层 `.call()` | G8 |
+| `POST /subagent-demo/stream` | 外层 `.stream()` + 内层 `.call()` | G9 |
+| `POST /subagent-demo/stream-deep` | 外层 `.stream()` + 内层 `.stream()` | G10 |
+| `GET /sequential-stream-demo` | 同一请求内顺序 4 次顶层 `.stream()`（无请求体） | G11 |
+
+一键跑全部回归：仓库根目录执行 `./scripts/run-regression.sh`，详见
+[`docs/testing/regression-playbook.md`](../docs/testing/regression-playbook.md)。
+
 ---
 
 ## 四、在 CLS 控制台看 trace
@@ -160,18 +185,25 @@ curl -sS -X POST http://localhost:8080/chat \
 
 ```
 demo-springboot/
-├── pom.xml                              # 继承 spring-boot-starter-parent:3.3.4
+├── pom.xml                              # 继承 spring-boot-starter-parent:4.1.1，Spring AI BOM 2.0.1
 ├── README.md                            # 本文件
 └── src/main/
     ├── java/com/tencentcloudapi/observability/springai/demo/boot/
     │   ├── DemoApplication.java         # @SpringBootApplication
     │   ├── config/
     │   │   ├── ClsObsConfig.java        # 把 SDK 挂到 ObservationRegistry
+    │   │   ├── ChatMemoryConfig.java    # ChatMemory（/chat/memory 使用）
     │   │   └── VectorStoreConfig.java   # SimpleVectorStore + ingest + 持久化
     │   ├── controller/
-    │   │   └── ChatController.java      # POST /chat，透传 session/user baggage
+    │   │   ├── ChatController.java                  # /chat、/chat/stream-*、/chat/memory
+    │   │   ├── ErrorToolsDemoController.java        # /error-demo/soft|hard
+    │   │   ├── MultiAgentDemoController.java        # /multi-agent-demo
+    │   │   ├── SubAgentDemoController.java          # /subagent-demo[/stream|/stream-deep]
+    │   │   ├── SubAgentDeepDemoController.java      # /subagent-deep-demo
+    │   │   └── SequentialStreamDemoController.java  # /sequential-stream-demo
     │   ├── service/
-    │   │   └── AgentService.java        # ChatClient + Tools + QuestionAnswerAdvisor
+    │   │   ├── AgentService.java        # ChatClient + Tools + QuestionAnswerAdvisor
+    │   │   └── MemoryChatService.java   # 带 ChatMemory 的 ChatClient
     │   └── tools/
     │       ├── WeatherTools.java        # @Tool getWeather(city)
     │       └── TimeTools.java           # @Tool getCurrentTime(timezone)
@@ -215,15 +247,15 @@ tokenhub 实测可用：`kinfra-text-embedding-0.6b`（1024 维，推荐）、
 chat 模型改成 `hunyuan-turbos-latest` / `hunyuan-pro` / `hunyuan-standard`，
 embedding 改成 `hunyuan-embedding`。API Key 格式也是 `sk-xxx`。
 
-### Q5：为什么 CLS trace 里没看到独立的 `retrieval` / `embedding` span？
+### Q5：如何关掉 RAG，只看 chat / tool 链路？
 
-Spring AI 1.0 的 `SimpleVectorStore` 内部的 `similaritySearch` 和
-`embeddingModel.embed()` **没有自带 Observation 发射点**（而 `PgVectorStore`、
-`RedisVectorStore` 等生产级实现有）。所以本 demo 的 trace 里 RAG 检索会被
-"折叠"进 `advisor` step 里，表现为 step 比纯 Tool 场景多出一个。要触发独立
-`retrieval` / `embedding` span，可以：
-- 换成 `PgVectorStore` 等 observability-ready 实现
-- 或在业务代码里显式调用一次 `embeddingModel.embed(text)`
+```bash
+mvn -f demo-springboot/pom.xml spring-boot:run \
+  -Dspring-boot.run.arguments="--demo.rag.enabled=false"
+```
+
+此时不会注册 `VectorStore` bean，也不会挂载 `QuestionAnswerAdvisor`，trace 中
+不再出现 `embedding` / `retrieval` span，适合单独验证 ReAct 轮次切换。
 
 ### Q6：怎么关掉 SDK 的 debug 日志？
 

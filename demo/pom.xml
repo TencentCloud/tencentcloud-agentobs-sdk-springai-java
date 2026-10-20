@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      本地验证子工程 (local verification sub-module):
+      仅用于端到端验证本 SDK 对 Spring AI 1.x 的 CLS GenAI Trace 采集完整性。
+      不参与主 jar 发布，不进主工程 build。
+
+      Only used for local end-to-end verification that this SDK captures a full
+      CLS-GenAI-Trace-compliant span tree from Spring AI 1.x. Not part of the
+      main artifact's release pipeline.
+    -->
+    <groupId>com.tencentcloudapi.observability.springai.testbench</groupId>
+    <artifactId>springai-demo</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>cls-sdk-springai-demo</name>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <springai.version>1.0.0</springai.version>
+        <micrometer.version>1.13.6</micrometer.version>
+    </properties>
+
+    <dependencies>
+        <!-- 待验证的 SDK (已 shade OTel API) -->
+        <dependency>
+            <groupId>com.tencentcloudapi.observability</groupId>
+            <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
+            <version>0.0.9</version>
+        </dependency>
+
+        <!-- Spring AI 1.x: 使用其 ChatClient / ChatModel / Advisor 接口 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-client-chat</artifactId>
+            <version>${springai.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-model</artifactId>
+            <version>${springai.version}</version>
+        </dependency>
+
+        <!-- Micrometer Observation: Spring AI 的事件 SPI；SDK 的 Handler 挂它上面 -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-observation</artifactId>
+            <version>${micrometer.version}</version>
+        </dependency>
+
+        <!-- SLF4J binder -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.13</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>springai-demo-shaded</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.3</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.tencentcloudapi.observability.springai.testbench.DemoMain</mainClass>
+                                </transformer>
+                                <!-- 合并 META-INF/services (SPI, 否则 Spring AI 自己的 provider 会丢) -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

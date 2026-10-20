@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      真实端到端 Demo（Spring Boot 3 Web + Spring AI 1.0 + 腾讯云混元 OpenAI
+      兼容接口 + 本地 RAG + 两个本地 Tool），用于演示本 SDK 把 Spring AI 全链路
+      自动上报到腾讯云 CLS GenAI Trace。
+
+      Real end-to-end demo (Spring Boot 3 Web + Spring AI 1.0 + Tencent Hunyuan
+      via OpenAI-compatible endpoint + local RAG + two local tools), used to
+      exercise this SDK's full-chain auto-upload to Tencent Cloud CLS GenAI
+      Trace. Not part of the SDK's release pipeline.
+    -->
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.tencentcloudapi.observability.springai.demo</groupId>
+    <artifactId>springai-hunyuan-demo</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>jar</packaging>
+    <name>cls-sdk-springai-hunyuan-demo</name>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <springai.version>2.0.1</springai.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring AI 2.0 BOM：统一 spring-ai-* 子模块版本 -->
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${springai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- 待验证的 CLS SDK（已 shade OTel API，避免与 Spring Boot 自带的
+             Micrometer-Tracing OTel 桥冲突） -->
+        <dependency>
+            <groupId>com.tencentcloudapi.observability</groupId>
+            <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <!-- Spring Boot Web -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Spring AI OpenAI 兼容 starter：Chat + Embedding 都走这个 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
+        </dependency>
+
+        <!-- RAG：RetrievalAugmentationAdvisor（Spring AI 2.0 更名为
+             spring-ai-vector-store-advisor，命名风格与其他 artifact 对齐） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-vector-store-advisor</artifactId>
+        </dependency>
+
+        <!-- Micrometer Observation（Spring Boot 已传递，这里显式声明以防万一） -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-observation</artifactId>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>com.tencentcloudapi.observability.springai.demo.boot.DemoApplication</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

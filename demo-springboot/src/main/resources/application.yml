@@ -1,0 +1,54 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: springai-hunyuan-demo
+
+  ai:
+    # 把 Spring AI 的 OpenAI 兼容客户端指向腾讯云混元
+    # 鉴权头是 Authorization: Bearer ${HUNYUAN_API_KEY}
+    # Spring AI 2.0 底层改用官方 OpenAI Kotlin SDK，不再自动前缀 /v1，
+    # 所以 base-url 必须自带 /v1。Spring AI 1.0 不自带 /v1 也能跑。
+    openai:
+      base-url: https://tokenhub.tencentmaas.com/v1
+      api-key: ${HUNYUAN_API_KEY:}
+
+      chat:
+        options:
+          # tokenhub 实测可用的 chat 模型（/v1/models 探测得出）:
+          #   hy4-preview         (推荐, 混元最新, 支持 function calling)
+          #   hy3                 (混元 3 代)
+          #   deepseek-v4-pro     (DeepSeek V4 Pro)
+          #   kimi-k3             (Kimi K3)
+          #   glm-5.3             (智谱 GLM 5.3)
+          model: hy4-preview
+          temperature: 0.7
+
+      embedding:
+        options:
+          # tokenhub 实测可用的 embedding 模型（/v1/embeddings 探测得出）:
+          #   kinfra-text-embedding-0.6b  (1024 维, 推荐, 轻量)
+          #   kinfra-text-embedding-4b    (更大更准)
+          model: kinfra-text-embedding-0.6b
+          # Spring AI 2.0 的 OpenAI SDK 默认 encoding_format=base64（OpenAI 官方规范），
+          # 但 tokenhub 只接受 float，必须显式配置。
+          encoding-format: float
+
+    # 让 Spring AI 的 Observation 自动带上 prompt / completion 内容
+    chat:
+      observations:
+        log-prompt: true
+        log-completion: true
+      client:
+        observations:
+          log-prompt: true
+
+logging:
+  level:
+    root: INFO
+    org.springframework.ai: INFO
+    com.tencentcloudapi.observability: DEBUG
+    # 关掉 Spring Boot web 的 noisy access log
+    org.apache.coyote: WARN
+    org.apache.tomcat: WARN

@@ -1,0 +1,65 @@
+# Build artifacts
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+dependency-reduced-pom.xml
+
+# Maven
+.mvn/
+mvnw
+mvnw.cmd
+.flattened-pom.xml
+
+# Test / Surefire / Failsafe reports
+**/surefire-reports/
+**/failsafe-reports/
+**/test-output/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+.factorypath
+nbproject/private/
+nbbuild/
+nbdist/
+.nb-gradle/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# JVM crash logs
+hs_err_pid*
+replay_pid*
+
+# Local secrets — never commit CLS credentials
+.env
+*.env.local
+~/.agentobs-springai/
+
+# demo-springboot runtime caches (RAG vector store persisted locally)
+vector-store.json
+**/vector-store.json
+
+# GPG
+*.asc
+*.gpg
+
+# Backup / temp
+*.bak
+*.swp
+*.tmp
+*~

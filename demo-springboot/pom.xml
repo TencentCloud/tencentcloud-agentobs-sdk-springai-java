@@ -56,7 +56,7 @@
         <dependency>
             <groupId>com.tencentcloudapi.observability</groupId>
             <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
-            <version>1.0.0</version>
+            <version>1.0.1</version>
         </dependency>
 
         <!-- Spring Boot Web -->

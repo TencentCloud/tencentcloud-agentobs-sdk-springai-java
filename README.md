@@ -42,7 +42,7 @@ ships it to Tencent Cloud CLS over the standard **OTLP/HTTP** protocol.
 <dependency>
     <groupId>com.tencentcloudapi.observability</groupId>
     <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -78,8 +78,9 @@ fields if any of the four is absent.
 | `CLS_DEPLOYMENT_ENVIRONMENT` | `deploymentEnvironment` | — | Resource `deployment.environment.name` |
 | `CLS_SOURCE` | `source` | local IP | Resource `host.ip` |
 | `CLS_BATCH_SIZE` | `batchSize` | `32` (clamped to 1..1000) | `BatchSpanProcessor` max export batch size |
+| `CLS_SAMPLE_RATIO` | `sampleRatio` | `1.0` (clamped to 0.0..1.0) | Head-based trace sampling — see [§6](#6-trace-sampling) |
 | `CLS_DEBUG` | `debug` | `false` | Log each observation's start / stop at SLF4J `DEBUG` |
-| `CLS_SPRINGAI_REACTOR_CONTEXT_PROPAGATION` | `reactorContextPropagation` | `true` | See [§6](#6-streaming--reactor) |
+| `CLS_SPRINGAI_REACTOR_CONTEXT_PROPAGATION` | `reactorContextPropagation` | `true` | See [§7](#7-streaming--reactor) |
 | `CLS_CUSTOM_<KEY>` | `customAttribute(key, value)` | — | Written as `agent.custom.<key>` (key lower-cased) |
 
 ### Resolution order (highest priority first)
@@ -253,7 +254,46 @@ and is set to `ERROR`; a root turn's error also propagates to its
 
 ---
 
-## 6. Streaming / Reactor
+## 6. Trace sampling
+
+By default every turn is uploaded (`CLS_SAMPLE_RATIO=1.0`). Lower the ratio
+to cut upload volume and CLS storage:
+
+```bash
+export CLS_SAMPLE_RATIO=0.1     # keep roughly 1 turn in 10
+```
+
+```java
+ClsObservability.install(
+        ClsConfig.builder()
+                .sampleRatio(0.1)
+                .build());
+```
+
+Resolution order: builder → `-Dcls.springai.sample-ratio` → `CLS_SAMPLE_RATIO`
+→ `.env` → `1.0`. Values outside `[0.0, 1.0]` are clamped; unparseable values
+fall back to `1.0` (losing telemetry is the worse failure mode).
+
+**The decision is per turn, and a turn is kept whole or dropped whole.** Only
+`enter_application` is a trace root; every other span — agent, react, chat,
+tool, embedding, retrieval, and any nested `invoke_subagent` subtree — is
+created with an explicit parent and inherits the root's verdict through OTel's
+`ParentBased` sampler. CLS therefore never renders a trace with holes.
+
+Two caveats before you turn this on:
+
+- **Per-turn, not per-session.** Each top-level `ChatClient` call starts a new
+  trace id, so a long conversation ends up with gaps between its turns. If
+  per-session auditability matters more than volume, keep `1.0`.
+- **It saves upload and storage, not CPU.** Sampled-out turns still run
+  through the handler's state machine and still build their attribute
+  strings; only the export is skipped.
+
+`CLS_SAMPLE_RATIO=0` drops everything and logs a warning at startup.
+
+---
+
+## 7. Streaming / Reactor
 
 `ChatClient.stream()` runs Spring AI's inner observations on Reactor
 scheduler threads. To keep them in one trace, `install()` reflectively calls
@@ -269,7 +309,7 @@ Opt out (e.g. you already enable it yourself) with any of:
 
 ---
 
-## 7. Coexisting with ARMS / other OTel implementations
+## 8. Coexisting with ARMS / other OTel implementations
 
 All `io.opentelemetry.*` classes (plus OkHttp / Okio / Protobuf) are
 relocated to `com.tencentcloudapi.observability.shaded.*` at build time:
@@ -289,7 +329,7 @@ APM linkage for that request. See [CHANGELOG](CHANGELOG.md) `0.0.12`.
 
 ---
 
-## 8. Local verification (`demo/`)
+## 9. Local verification (`demo/`)
 
 A standalone demo in `demo/` fires a synthetic Spring-AI-shaped observation
 tree (no real LLM, no LLM network traffic — only the upload to CLS) and
@@ -325,7 +365,7 @@ filter by `gen_ai.session.id = <printed value>`:
 
 ---
 
-## 9. Real end-to-end demo (`demo-springboot/`)
+## 10. Real end-to-end demo (`demo-springboot/`)
 
 A Spring Boot 4 + Spring AI 2.0 web app that calls the real Tencent
 Hunyuan LLM (`hy4-preview` via tokenhub), with two `@Tool`s, local-vector-store
@@ -357,7 +397,7 @@ See [`demo-springboot/README.md`](demo-springboot/README.md) for details.
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 Enable `CLS_DEBUG=1` (or `.debug(true)`) and set the
 `com.tencentcloudapi.observability` logger to `DEBUG` to see lines such as
@@ -367,14 +407,15 @@ Enable `CLS_DEBUG=1` (or `.debug(true)`) and set the
 |---|---|---|
 | `IllegalStateException: CLS configuration incomplete` | a required field is missing | set the four `CLS_*` variables |
 | No spans at all | handler registered on the wrong registry | call `registerOn(...)` with the registry Spring AI actually uses |
-| No trace on CLS | wrong endpoint / topic / credentials | check the `installed (service=..., endpoint=..., topic=...)` startup log |
+| No trace on CLS | wrong endpoint / topic / credentials | check the `installed (service=..., endpoint=..., topic=..., sampleRatio=...)` startup log |
+| Only some turns appear on CLS | sampling is active | check `sampleRatio` in the startup log; set `CLS_SAMPLE_RATIO=1.0` to keep everything |
 | `.stream()` spans split into many traces | Reactor propagation disabled or failed | check the startup log for `enabled Reactor automatic context propagation` |
 | `session.id` is `sess-...` | `ClsBaggage` not set | call `ClsBaggage.set(...)` before the `ChatClient` call |
 | Spring AI's `gen_ai.prompt` is empty | `include-prompt` is off by default | use the SDK's `gen_ai.input.messages` / `gen_ai.output.messages` |
 
 ---
 
-## 11. Regression suite
+## 12. Regression suite
 
 [`scripts/run-regression.sh`](scripts/run-regression.sh) runs 12 cases
 (13 sub-cases, G1–G10) against `demo-springboot`: top-level sync / stream,

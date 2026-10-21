@@ -33,7 +33,7 @@
         <dependency>
             <groupId>com.tencentcloudapi.observability</groupId>
             <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
-            <version>1.0.0</version>
+            <version>1.0.1</version>
         </dependency>
 
         <!-- Spring AI 1.x: 使用其 ChatClient / ChatModel / Advisor 接口 -->

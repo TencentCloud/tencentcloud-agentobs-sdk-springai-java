@@ -42,6 +42,32 @@ public final class ClsConfig {
     public static final String ENV_BATCH_SIZE = "CLS_BATCH_SIZE";
     public static final String ENV_DEBUG = "CLS_DEBUG";
     /**
+     * Head-based trace sampling ratio in {@code [0.0, 1.0]} (default
+     * {@code 1.0} = keep every trace).
+     *
+     * <p>The decision is taken once, on the turn's root
+     * {@code enter_application} span, and every descendant span (agent /
+     * react / chat / tool / embedding / retrieval / subagent) inherits it
+     * through OTel's {@code ParentBased} sampler. A turn is therefore always
+     * uploaded <b>whole or not at all</b> — CLS never shows a half-built
+     * trace tree.
+     *
+     * <p>Because each top-level {@code ChatClient} call starts a fresh trace
+     * id, the ratio applies <b>per turn</b>, not per session: with
+     * {@code 0.1}, roughly one in ten turns is kept, and a long conversation
+     * will have gaps between its turns. Use {@code 1.0} whenever per-session
+     * auditability matters more than volume.
+     *
+     * <p>Dropped traces still run through the handler's state machine, so
+     * sampling cuts upload volume and CLS storage, not in-process overhead.
+     *
+     * <p>Env var: {@code CLS_SAMPLE_RATIO}. System property:
+     * {@code cls.springai.sample-ratio}. Values outside {@code [0.0, 1.0]}
+     * are clamped; unparseable values fall back to {@code 1.0}.
+     */
+    public static final String ENV_SAMPLE_RATIO = "CLS_SAMPLE_RATIO";
+    public static final String SYSPROP_SAMPLE_RATIO = "cls.springai.sample-ratio";
+    /**
      * Toggle for Reactor automatic context propagation (default on).
      *
      * <p>Spring AI's {@code ChatClient.stream()} / {@code ChatModel.stream()}
@@ -78,6 +104,7 @@ public final class ClsConfig {
     private static final String DEFAULT_SERVICE_NAME = "springai-app";
     private static final int DEFAULT_BATCH_SIZE = 32;
     private static final int MAX_BATCH_SIZE = 1000;
+    private static final double DEFAULT_SAMPLE_RATIO = 1.0d;
 
     private final String endpoint;
     private final String topicId;
@@ -93,6 +120,10 @@ public final class ClsConfig {
     private final String source;
     private final int batchSize;
     private final boolean debug;
+    /** Head-based trace sampling ratio in {@code [0.0, 1.0]}; {@code 1.0}
+     *  keeps every trace. Applied on the turn's root span and inherited by
+     *  all descendants. See {@link #ENV_SAMPLE_RATIO}. */
+    private final double sampleRatio;
     /** When true, {@link ClsObservability#install} calls
      *  {@code reactor.core.publisher.Hooks.enableAutomaticContextPropagation()}
      *  so Micrometer's {@code ObservationThreadLocalAccessor} crosses Reactor
@@ -108,7 +139,7 @@ public final class ClsConfig {
     private ClsConfig(String endpoint, String topicId, String secretId, String secretKey,
                       String serviceName, String serviceVersion, String serviceInstanceId,
                       String deploymentEnvironment, String source, int batchSize, boolean debug,
-                      boolean reactorContextPropagation,
+                      double sampleRatio, boolean reactorContextPropagation,
                       Map<String, String> customAttributes) {
         this.endpoint = endpoint;
         this.topicId = topicId;
@@ -121,6 +152,7 @@ public final class ClsConfig {
         this.source = source;
         this.batchSize = batchSize;
         this.debug = debug;
+        this.sampleRatio = sampleRatio;
         this.reactorContextPropagation = reactorContextPropagation;
         this.customAttributes = customAttributes;
     }
@@ -139,6 +171,11 @@ public final class ClsConfig {
     public String source() { return source; }
     public int batchSize() { return batchSize; }
     public boolean debug() { return debug; }
+    /** @return head-based trace sampling ratio in {@code [0.0, 1.0]};
+     *  {@code 1.0} (default) keeps every trace. Decided once per turn on the
+     *  root span and inherited by all descendants, so a turn is uploaded
+     *  whole or not at all. See {@link #ENV_SAMPLE_RATIO}. */
+    public double sampleRatio() { return sampleRatio; }
     /** @return whether {@link ClsObservability#install} should enable
      *  {@code reactor.core.publisher.Hooks.enableAutomaticContextPropagation()}
      *  at startup. Default {@code true}; opt out via builder, env var
@@ -188,6 +225,7 @@ public final class ClsConfig {
         private String source;
         private Integer batchSize;
         private Boolean debug;
+        private Double sampleRatio;
         private Boolean reactorContextPropagation;
         private final Map<String, String> customAttributes = new LinkedHashMap<>();
 
@@ -202,6 +240,15 @@ public final class ClsConfig {
         public Builder source(String source) { this.source = source; return this; }
         public Builder batchSize(Integer batchSize) { this.batchSize = batchSize; return this; }
         public Builder debug(Boolean debug) { this.debug = debug; return this; }
+        /** Head-based trace sampling ratio in {@code [0.0, 1.0]}. {@code 1.0}
+         *  (default) keeps every trace, {@code 0.0} drops them all. The
+         *  decision is taken once per turn on the root span and inherited by
+         *  every descendant, so a turn is uploaded whole or not at all.
+         *  Out-of-range values are clamped. See {@link ClsConfig#ENV_SAMPLE_RATIO}. */
+        public Builder sampleRatio(Double sampleRatio) {
+            this.sampleRatio = sampleRatio;
+            return this;
+        }
         /** Opt in/out of the Reactor automatic context propagation hook that
          *  {@link ClsObservability#install} calls at startup. Default
          *  {@code true}; set to {@code false} if you already enable the hook
@@ -274,6 +321,34 @@ public final class ClsConfig {
                 resolvedDebug = raw.equals("1") || raw.equals("true") || raw.equals("yes");
             }
 
+            // Trace sampling ratio: resolution order is
+            //   builder explicit > system property > env var > .env file > default 1.0.
+            // Same precedence rationale as the Reactor knob below: a system
+            // property lets an operator dial sampling down on one JVM without
+            // touching an inherited env var. Unparseable values fall back to
+            // 1.0 (keep everything) rather than silently dropping traces —
+            // losing telemetry is a worse failure mode than over-reporting.
+            double resolvedSampleRatio = DEFAULT_SAMPLE_RATIO;
+            if (sampleRatio != null) {
+                resolvedSampleRatio = sampleRatio;
+            } else {
+                String raw = System.getProperty(SYSPROP_SAMPLE_RATIO);
+                if (raw == null || raw.isEmpty()) {
+                    raw = resolve(null, ENV_SAMPLE_RATIO, envFile, "");
+                }
+                if (!raw.trim().isEmpty()) {
+                    try {
+                        resolvedSampleRatio = Double.parseDouble(raw.trim());
+                    } catch (NumberFormatException ignored) {
+                        resolvedSampleRatio = DEFAULT_SAMPLE_RATIO;
+                    }
+                }
+            }
+            if (Double.isNaN(resolvedSampleRatio)) {
+                resolvedSampleRatio = DEFAULT_SAMPLE_RATIO;
+            }
+            resolvedSampleRatio = Math.max(0.0d, Math.min(resolvedSampleRatio, 1.0d));
+
             // Reactor context-propagation hook: resolution order is
             //   builder explicit > system property > env var > .env file > default true.
             // System property wins over env var so a user doing `-Dcls.springai
@@ -315,8 +390,8 @@ public final class ClsConfig {
             return new ClsConfig(resolvedEndpoint, resolvedTopicId, resolvedSecretId,
                     resolvedSecretKey, resolvedServiceName, resolvedServiceVersion,
                     resolvedServiceInstanceId, resolvedDeploymentEnvironment, resolvedSource,
-                    resolvedBatchSize, resolvedDebug, resolvedReactorPropagation,
-                    resolveCustomAttributes(envFile));
+                    resolvedBatchSize, resolvedDebug, resolvedSampleRatio,
+                    resolvedReactorPropagation, resolveCustomAttributes(envFile));
         }
 
         /** Fuse builder-supplied customAttributes with any env-var-based ones.

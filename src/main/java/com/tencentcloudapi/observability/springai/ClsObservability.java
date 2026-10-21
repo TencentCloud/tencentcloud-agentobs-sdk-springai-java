@@ -11,6 +11,7 @@ import io.opentelemetry.sdk.resources.Resource;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.export.BatchSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
+import io.opentelemetry.sdk.trace.samplers.Sampler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -124,6 +125,7 @@ public final class ClsObservability {
 
         SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
                 .setResource(resource)
+                .setSampler(buildSampler(config))
                 .addSpanProcessor(BatchSpanProcessor.builder(exporter)
                         .setMaxExportBatchSize(config.batchSize())
                         .build())
@@ -148,11 +150,50 @@ public final class ClsObservability {
         }, "cls-springai-shutdown"));
 
         LOG.info("CLS observability (Spring AI, OTLP/HTTP) installed "
-                        + "(service={}, endpoint={}, topic={}). "
+                        + "(service={}, endpoint={}, topic={}, sampleRatio={}). "
                         + "Next step: obs.registerOn(observationRegistry).",
-                config.serviceName(), config.otlpTracesUrl(), config.topicId());
+                config.serviceName(), config.otlpTracesUrl(), config.topicId(),
+                config.sampleRatio());
 
         return new ClsObservability(tracerProvider, exporter, sdk, tracer, config);
+    }
+
+    /**
+     * Build the head-based {@link Sampler} for the configured sample ratio.
+     *
+     * <p>Wrapping the ratio sampler in {@link Sampler#parentBased} is what
+     * keeps a turn's trace tree intact. Only the turn's root
+     * {@code enter_application} span is a trace root; every other span this
+     * SDK emits (agent / react / chat / tool / embedding / retrieval, and any
+     * nested {@code invoke_subagent} subtree) is created with an explicit
+     * parent, so it inherits the root's decision instead of re-rolling the
+     * dice. A turn is therefore uploaded whole or not at all — CLS never
+     * renders a trace with holes in it.
+     *
+     * <p>Because {@code traceIdRatioBased} derives its verdict from the trace
+     * id, and every top-level {@code ChatClient} call starts a fresh trace id,
+     * the ratio applies per turn rather than per session.
+     *
+     * <p>The two extremes are special-cased to the constant samplers: at
+     * {@code 1.0} this is exactly the pre-sampling behaviour (OTel's default
+     * is {@code ParentBased(root=AlwaysOn)}), so existing deployments see no
+     * change unless they opt in.
+     */
+    private static Sampler buildSampler(ClsConfig config) {
+        double ratio = config.sampleRatio();
+        if (ratio >= 1.0d) {
+            return Sampler.alwaysOn();
+        }
+        if (ratio <= 0.0d) {
+            LOG.warn("[cls-springai] sampleRatio=0 — every trace will be dropped and "
+                    + "nothing will reach CLS. Set " + ClsConfig.ENV_SAMPLE_RATIO
+                    + " above 0 (or remove it) to re-enable upload.");
+            return Sampler.alwaysOff();
+        }
+        LOG.info("[cls-springai] head-based trace sampling enabled (ratio={}); the "
+                + "decision is taken once per turn and inherited by all child spans, "
+                + "so sampled-out turns are dropped whole.", ratio);
+        return Sampler.parentBased(Sampler.traceIdRatioBased(ratio));
     }
 
     /**

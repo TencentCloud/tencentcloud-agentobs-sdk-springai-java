@@ -32,7 +32,7 @@
 <dependency>
     <groupId>com.tencentcloudapi.observability</groupId>
     <artifactId>tencentcloud-agentobs-sdk-springai-java</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
 </dependency>
 ```
 
@@ -66,8 +66,9 @@
 | `CLS_DEPLOYMENT_ENVIRONMENT` | `deploymentEnvironment` | — | Resource `deployment.environment.name` |
 | `CLS_SOURCE` | `source` | 本机 IP | Resource `host.ip` |
 | `CLS_BATCH_SIZE` | `batchSize` | `32`（限制在 1..1000） | `BatchSpanProcessor` 单批最大导出条数 |
+| `CLS_SAMPLE_RATIO` | `sampleRatio` | `1.0`（限制在 0.0..1.0） | trace 采样率，见[第六节](#六trace-采样) |
 | `CLS_DEBUG` | `debug` | `false` | 以 SLF4J `DEBUG` 级别打印每个 observation 的 start / stop |
-| `CLS_SPRINGAI_REACTOR_CONTEXT_PROPAGATION` | `reactorContextPropagation` | `true` | 见[第六节](#六流式--reactor) |
+| `CLS_SPRINGAI_REACTOR_CONTEXT_PROPAGATION` | `reactorContextPropagation` | `true` | 见[第七节](#七流式--reactor) |
 | `CLS_CUSTOM_<KEY>` | `customAttribute(key, value)` | — | 以 `agent.custom.<key>` 写入（key 转小写） |
 
 ### 配置来源优先级（从高到低）
@@ -213,7 +214,35 @@ Spring AI 附带的 Micrometer low / high cardinality 键值也会一并写入�
 
 ---
 
-## 六、流式 / Reactor
+## 六、Trace 采样
+
+默认全量上报（`CLS_SAMPLE_RATIO=1.0`）。需要降低上报量和 CLS 存储成本时调低采样率：
+
+```bash
+export CLS_SAMPLE_RATIO=0.1     # 大约每 10 个 turn 保留 1 个
+```
+
+```java
+ClsObservability.install(
+        ClsConfig.builder()
+                .sampleRatio(0.1)
+                .build());
+```
+
+优先级：builder → `-Dcls.springai.sample-ratio` → `CLS_SAMPLE_RATIO` → `.env` → `1.0`。超出 `[0.0, 1.0]` 的值会被钳位；无法解析的值回退为 `1.0`（丢数据比多报更糟）。
+
+**采样决策按 turn 做一次，整个 turn 要么全留、要么全丢。** 只有 `enter_application` 是 trace 根节点，其余所有 span —— agent、react、chat、tool、embedding、retrieval，以及嵌套的 `invoke_subagent` 子树 —— 都是带显式父节点创建的，会通过 OTel 的 `ParentBased` sampler 继承根节点的决策。因此 CLS 上不会出现结构残缺的 trace。
+
+开启前需注意两点：
+
+- **按 turn 而非按 session 采样。** 每次顶层 `ChatClient` 调用都会生成新的 trace id，因此长对话会在轮次之间出现断档。若按会话完整审计比控量更重要，请保持 `1.0`。
+- **省的是上报与存储，不是 CPU。** 被采样丢弃的 turn 仍会走完 handler 的状态机、仍会拼装属性字符串，只是跳过导出。
+
+`CLS_SAMPLE_RATIO=0` 会丢弃全部 trace，并在启动时打印一条告警。
+
+---
+
+## 七、流式 / Reactor
 
 `ChatClient.stream()` 会把 Spring AI 内部的 observation 派发到 Reactor 调度线程。为了让它们留在同一条 trace 中，`install()` 会通过反射调用 `reactor.core.publisher.Hooks.enableAutomaticContextPropagation()`（编译期不依赖 `reactor-core`，classpath 中没有 Reactor 时为空操作）。该 hook 是 JVM 全局且幂等的。
 
@@ -225,7 +254,7 @@ Spring AI 附带的 Micrometer low / high cardinality 键值也会一并写入�
 
 ---
 
-## 七、与 ARMS / 其他 OTel 实现共存
+## 八、与 ARMS / 其他 OTel 实现共存
 
 构建时已把 `io.opentelemetry.*`（以及 OkHttp / Okio / Protobuf）整体 relocate 到 `com.tencentcloudapi.observability.shaded.*`：
 
@@ -237,7 +266,7 @@ Spring AI 附带的 Micrometer low / high cardinality 键值也会一并写入�
 
 ---
 
-## 八、本地验证（`demo/`）
+## 九、本地验证（`demo/`）
 
 `demo/` 用一棵合成的 Spring-AI 形态 observation 树驱动 handler（不调用真实 LLM，只有上报 CLS 需要网络），产出恰好 **6 个 span**。
 
@@ -270,7 +299,7 @@ java -jar target/springai-demo-shaded.jar
 
 ---
 
-## 九、真实端到端 demo（`demo-springboot/`）
+## 十、真实端到端 demo（`demo-springboot/`）
 
 基于 Spring Boot 4 + Spring AI 2.0 的 Web 应用，调用真实的腾讯混元大模型（`hy4-preview`，经 tokenhub），包含两个 `@Tool`、本地向量库 RAG、`ChatMemory`、子 Agent 和流式端点。
 
@@ -300,7 +329,7 @@ curl -sS -X POST http://localhost:8080/chat \
 
 ---
 
-## 十、排查
+## 十一、排查
 
 打开 `CLS_DEBUG=1`（或 `.debug(true)`），并把 `com.tencentcloudapi.observability` logger 调到 `DEBUG`，可看到 `onStart  TURN  session=... turn=... traceId=...` 等日志。
 
@@ -308,14 +337,15 @@ curl -sS -X POST http://localhost:8080/chat \
 |---|---|---|
 | `IllegalStateException: CLS configuration incomplete` | 缺少必填项 | 配齐四个 `CLS_*` 变量 |
 | 完全收不到 span | handler 挂错了 registry | `registerOn(...)` 传入 Spring AI 实际使用的 registry |
-| CLS 上看不到 trace | endpoint / topic / 凭证有误 | 查看启动日志 `installed (service=..., endpoint=..., topic=...)` |
+| CLS 上看不到 trace | endpoint / topic / 凭证有误 | 查看启动日志 `installed (service=..., endpoint=..., topic=..., sampleRatio=...)` |
+| CLS 上只有部分 turn | 采样已生效 | 查看启动日志里的 `sampleRatio`，设为 `CLS_SAMPLE_RATIO=1.0` 可全量上报 |
 | `.stream()` 的 span 被拆成多条 trace | Reactor 上下文传播被关闭或开启失败 | 检查启动日志是否有 `enabled Reactor automatic context propagation` |
 | `session.id` 是 `sess-...` | 未设置 `ClsBaggage` | 在调用 `ChatClient` 前调用 `ClsBaggage.set(...)` |
 | Spring AI 原生 `gen_ai.prompt` 为空 | `include-prompt` 默认关闭 | 使用 SDK 写入的 `gen_ai.input.messages` / `gen_ai.output.messages` |
 
 ---
 
-## 十一、回归测试套件
+## 十二、回归测试套件
 
 [`scripts/run-regression.sh`](scripts/run-regression.sh) 基于 `demo-springboot` 跑 12 个用例（13 个子用例，G1–G10）：顶层同步 / 流式、ReAct 轮次切换、ChatMemory、tool 异常软吞 / 硬抛、嵌套与 3 层子 Agent、10 路并发流式、兄弟 ChatClient、Reactor 跨线程子 Agent。
 

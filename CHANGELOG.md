@@ -8,6 +8,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.1] - 2026-10-21
+
+### Added
+
+- **Head-based trace sampling** via `CLS_SAMPLE_RATIO` /
+  `-Dcls.springai.sample-ratio` / `ClsConfig.Builder#sampleRatio(Double)`,
+  defaulting to `1.0` (keep every trace, i.e. the pre-existing behaviour).
+  Resolution order is builder → system property → env var → `.env` →
+  default. Values outside `[0.0, 1.0]` are clamped; `NaN` and unparseable
+  values fall back to `1.0`, on the grounds that silently dropping
+  telemetry is a worse failure mode than over-reporting.
+  - `SdkTracerProvider` is now built with an explicit sampler:
+    `alwaysOn()` at ratio `1.0`, `alwaysOff()` at `0.0` (logged as a
+    `WARN`, since nothing will reach CLS), and
+    `parentBased(traceIdRatioBased(ratio))` in between.
+  - **A turn is sampled whole or not at all.** Only `enter_application`
+    is a trace root; every other span the SDK emits (agent / react /
+    chat / tool / embedding / retrieval, plus any nested
+    `invoke_subagent` subtree) is created with an explicit parent, so the
+    `ParentBased` wrapper makes it inherit the root's verdict rather than
+    re-roll. CLS never renders a partially-sampled trace tree.
+  - Because `traceIdRatioBased` keys off the trace id and each top-level
+    `ChatClient` call starts a fresh trace, the ratio applies **per turn,
+    not per session** — a long conversation will show gaps between turns.
+    Keep `1.0` where per-session auditability matters.
+  - Sampling reduces upload volume and CLS storage, not in-process cost:
+    sampled-out turns still traverse the handler's state machine.
+  - The effective ratio is reported in the existing `install()` info log
+    (`installed (service=..., endpoint=..., topic=..., sampleRatio=...)`).
+- Unit test `ClsConfigSampleRatioTest` pinning the builder / system-property
+  resolution order, clamping and fallback behaviour.
+
+### Compatibility
+
+- No API removal; `sampleRatio` defaults to `1.0`, so existing deployments
+  behave exactly as in `1.0.0` unless they opt in.
+- The handler's turn/scope state machine was not touched. It reads only
+  `SpanContext` (which stays valid for non-recording spans) and has no
+  `isRecording()` branches, so sampled-out turns keep their parent/child
+  wiring intact.
+
+### Build
+
+- `pom.xml` version bumped `1.0.0 → 1.0.1`; the SDK dependency in
+  `demo/pom.xml` and `demo-springboot/pom.xml` bumped to match. The
+  `springai.version` properties are unrelated and left untouched.
+
+---
+
 ## [1.0.0] - 2026-10-16
 
 First formal GA release. Consolidates the sequential-stream memory-leak
